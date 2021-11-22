@@ -848,7 +848,7 @@ bool VideoInterceptor::saveFrameWebp(AVFrame *pFrame, int width, int height, con
     return true;
 }
 
-bool VideoInterceptor::jpeg2Webp(unsigned char *jpegBuf, int jpegSize, const char *const webpFilePath) const {
+bool VideoInterceptor::jpeg2Webp(unsigned char *jpegBuf, int jpegSize, const char *const webpFilePath) {
 
     if (jpegBuf == nullptr || jpegSize == 0 || webpFilePath == nullptr) {
         Log::error(TAG, "jpegBuf == nullptr || jpegSize == 0 || webpFilePath == nullptr");

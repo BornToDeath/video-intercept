@@ -99,7 +99,7 @@ private:
      * @param webpFilePath
      * @return
      */
-    static bool jpeg2Webp(unsigned char *jpegBuf, int jpegSize, const char *const webpFilePath) const;
+    static bool jpeg2Webp(unsigned char *jpegBuf, int jpegSize, const char *const webpFilePath);
 
 
 private:
