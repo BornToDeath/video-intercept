@@ -8,22 +8,20 @@
 #include "VideoInterceptor.h"
 #include "Utils.h"
 
-extern "C" {
-#include "jpeglib.h"
-#include "turbojpeg.h"
-}
-
 #define STACK_SIZE (1024)
 
 // 最大帧率限制 一般为15-30帧/秒
-#define Frame_Rate_Max_Limit 60
-#define Frame_Rate_Min_Limit 8
+#define Frame_Rate_Max_Limit (60)
+#define Frame_Rate_Min_Limit (8)
 
 // 截图位置最大偏差秒数  4秒
 #define Intercept_Max_Deviation_Second (4)
 
 // jpeg 图片压缩质量
 #define Jpeg_Compression_Quality (100)
+
+// webp 图片压缩质量
+#define Webp_Compression_Quality (100)
 
 // 缩放之后的图片宽高
 #define Dest_Width  (1280)
@@ -140,7 +138,6 @@ std::shared_ptr<VideoModel> VideoInterceptor::analyseVideoInfo(const char *const
         return nullptr;
     }
 
-//    AVFormatContext *pFormatCtx = nullptr;
     char errorBuf[STACK_SIZE];
     int ret = avformat_open_input(&pFormatCtx, videoPath, nullptr, nullptr);
     if (ret < 0) {
@@ -154,6 +151,7 @@ std::shared_ptr<VideoModel> VideoInterceptor::analyseVideoInfo(const char *const
     for (int i = 0; i < pFormatCtx->nb_streams; i++) {
         if (pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
             videoIdx = i;
+            break;
         }
     }
     if (videoIdx < 0) {
@@ -222,22 +220,12 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
         return false;
     }
 
+    Log::info(TAG, "正在从视频文件中截图, 视频:%s, 截图点个数:%d", videoModel->videoPath.c_str(), videoModel->points.size());
+
     /* Tips: 在下面的代码中，时间变量的前缀如果是av表示按标准时基为单位(微秒)，如果是stream表示按视频流的时基为单位 ------ */
 
-    // 保存FFmpeg相关方法的执行结果
-    int resultCode = -1;
-    // FFmpeg相关方法执行错误时的错误信息
-    char errorBuffer[STACK_SIZE];
-    // 图片解码后图片的指针，没有用到
-    int frameFinished;
-
-    AVPacket packet;
-    Log::debug(TAG, "Before av_init_packet");
-    av_init_packet(&packet);
-    Log::debug(TAG, "After av_init_packet");
-
     // 视频流的时基
-    const AVRational STREAM_TIME_BASE_Q = formatCtx->streams[videoIndex]->time_base;
+    const AVRational steamTimeBase = formatCtx->streams[videoIndex]->time_base;
 
     // 获取视频流的帧率
     AVRational videoFrameRate = formatCtx->streams[videoIndex]->r_frame_rate;
@@ -246,14 +234,14 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
 
     // 两帧之间的时间间隔的一半，单位微秒
     int avHalfTimeIntervalBetween2Frame = ((int) (AV_TIME_BASE / videoFrameRateDouble)) >> 1;
-    int64_t streamHalfTimeIntervalBetween2Frame = av_rescale_q(avHalfTimeIntervalBetween2Frame,
-                                                               AV_TIME_BASE_Q, STREAM_TIME_BASE_Q);
+    int64_t streamHalfTimeIntervalBetween2Frame = av_rescale_q(avHalfTimeIntervalBetween2Frame, AV_TIME_BASE_Q,
+                                                               steamTimeBase);
 //    Log::error(LOGGER_WARNING, TAG, "视频帧率 = %f, 帧间距的一半 = %lld", videoFrameRateDouble, streamHalfTimeIntervalBetween2Frame);
 
     // 获取两个关键帧之间的平均间隔（参考值）
     bool isGopSizeValid = false;
     int64_t avKeyPacketTimeInterval = -1;
-    getKeyPacketTimeInterval(&isGopSizeValid, &avKeyPacketTimeInterval);
+    getKeyPacketTimeInterval(isGopSizeValid, avKeyPacketTimeInterval);
 
     // 视频解码过滤器清空缓存
     avcodec_flush_buffers(formatCtx->streams[videoIndex]->codec);
@@ -262,8 +250,9 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
     unsigned long frameIndex = 0;
     int64_t lastPointKeyPacketIndex = 0;
 
+    // 开始截图
     for (frameIndex = 0; frameIndex < videoModel->points.size(); frameIndex++) {
-
+        // 截图点
         auto timestamp = videoModel->points.at(frameIndex);
         Log::info(TAG, ">>> timestamp=%llu", timestamp);
 
@@ -279,7 +268,7 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
         int64_t avExpectFrameTime = static_cast<int64_t>(timestamp - videoModel->start) * 1000;
 
         // 截图点的相对时间，以流的时基为时基
-        int64_t streamExpectFrameTime = av_rescale_q(avExpectFrameTime, AV_TIME_BASE_Q, STREAM_TIME_BASE_Q);
+        int64_t streamExpectFrameTime = av_rescale_q(avExpectFrameTime, AV_TIME_BASE_Q, steamTimeBase);
 
         // 判断是否需要Seek
         bool isNeedSeek = false;
@@ -293,44 +282,43 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
             lastPointKeyPacketIndex = currentPointKeyPacketIndex;
         }
 
+        // 保存FFmpeg相关方法的执行结果
+        int resultCode = -1;
+        // FFmpeg相关方法执行错误时的错误信息
+        char errorBuffer[STACK_SIZE];
         // Seek到指定时间之前最近的一个关键帧
         bool soughtJustNow = false;
+
         if (isNeedSeek) {
             resultCode = av_seek_frame(formatCtx, videoIndex,
                                        streamExpectFrameTime + formatCtx->streams[videoIndex]->start_time,
                                        AVSEEK_FLAG_BACKWARD);
-
             // Seek 失败
             if (resultCode < 0) {
                 av_strerror(resultCode, errorBuffer, STACK_SIZE);
                 Log::error(TAG, "point = %lld, code = %d, error = %s", timestamp, resultCode, errorBuffer);
-                av_free_packet(&packet);
                 return false;
             }
             soughtJustNow = true;
         }
 
-        // 从关键帧开始往后读取，直到找到一个距离截图点最近的一个帧，break
-        bool isReadFrameSuccess = false;
-        bool isVideoStream = false;
-        bool isNearestPacket = false;
+        // 保存解码的数据包
+        AVPacket packet;
+        av_init_packet(&packet);
+
+        // 标识是够截图成功
         bool interceptPointSuccess = false;
-        bool decodeError;
-        bool decodeNothing;
-        int64_t streamCurrentPacketTime;
-        int64_t streamDifference;
-        int64_t streamDifferenceAbs;
+
+        // 从关键帧开始往后读取，直到找到一个距离截图点最近的一个帧，break
         while (true) {
             // 不用关心这个值, 并且不应该关心这个值。
-            frameFinished = 0;
+            int frameFinished = 0;
 
             // 1. 读取Packet
             resultCode = av_read_frame(formatCtx, &packet);
-            isReadFrameSuccess = (resultCode == 0);
-            isVideoStream = (packet.stream_index == videoIndex);
 
             // 1.1 如果读取失败，continue;
-            if (!isReadFrameSuccess) {
+            if (resultCode != 0) {
                 av_strerror(resultCode, errorBuffer, STACK_SIZE);
                 Log::error(TAG, "Read frame failed! code=%d, error=%s", resultCode, errorBuffer);
                 av_free_packet(&packet);
@@ -338,7 +326,7 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
             }
 
             // 1.2 如果读取的不是视频流的包
-            if (!isVideoStream) {
+            if (packet.stream_index != videoIndex) {
                 av_free_packet(&packet);
                 continue;
             }
@@ -348,18 +336,15 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
                 int isIFrame = (packet.flags & AV_PKT_FLAG_KEY);
                 // 如果不是，Seek回去，以后也不再Seek了
                 if (!isIFrame) {
-//                    Log::error(LOGGER_WARNING, TAG, "taskId = %lld point = %lld",rid, points.at(frameIndex)->timestamp);
-
                     // 往回Seek 3倍 gop大小(实际上1.5就可以，但保守起见多退一点)
-                    AVRational streamTimebase = formatCtx->streams[videoIndex]->time_base;
                     int64_t streamKeyPacketTimeInterval = av_rescale_q(avKeyPacketTimeInterval, AV_TIME_BASE_Q,
-                                                                       streamTimebase);
+                                                                       steamTimeBase);
                     int64_t seekTarget = packet.pts - streamKeyPacketTimeInterval * 3;
                     // 如果比流的起始时间还小，说明是视频刚开始，seek到视频流的起始位置即可
-                    seekTarget = seekTarget < formatCtx->streams[videoIndex]->start_time
-                                 ? formatCtx->streams[videoIndex]->start_time : seekTarget;
-                    resultCode = av_seek_frame(formatCtx, videoIndex, seekTarget,
-                                               AVSEEK_FLAG_BACKWARD); // TODO: Need modify to seekTarget
+                    if (seekTarget < formatCtx->streams[videoIndex]->start_time) {
+                        seekTarget = formatCtx->streams[videoIndex]->start_time;
+                    }
+                    resultCode = av_seek_frame(formatCtx, videoIndex, seekTarget, AVSEEK_FLAG_BACKWARD);
 
                     // Seek 失败
                     if (resultCode < 0) {
@@ -375,10 +360,9 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
 
             // 2. 解码
             resultCode = avcodec_decode_video2(codecCtx, frameOrigin, &frameFinished, &packet);
-            decodeError = (resultCode < 0);
-            decodeNothing = (resultCode == 0); // || frameFinished == 0
+
             // 2.1 解码失败
-            if (decodeError) {
+            if (resultCode < 0) {
                 av_strerror(resultCode, errorBuffer, STACK_SIZE);
                 Log::error(TAG, "decompress the packet failed! and the error code is %d. error:%s,time:%lld",
                            resultCode, errorBuffer, timestamp);
@@ -386,7 +370,7 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
                 break;
             }
             // 2.2 没有解码到东西
-            if (decodeNothing) {
+            if (resultCode == 0) {
                 Log::error(TAG, "No frame could be decompressed! resultCode = %d, frameFinish = %d", resultCode,
                            frameFinished);
                 av_free_packet(&packet);
@@ -400,31 +384,29 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
             }
 
             // 3. 判断是不是距离最近的包
+            bool isNearestPacket = false;
+
             // 3.1 当前读取到的包的流时间
-            streamCurrentPacketTime = frameOrigin->pts - formatCtx->streams[videoIndex]->start_time;
+            int64_t streamCurrentPacketTime = frameOrigin->pts - formatCtx->streams[videoIndex]->start_time;
             if (streamCurrentPacketTime > 0) {
                 // 3.2 当前包的流时间与期望的流时间之间的差
-                streamDifference = streamExpectFrameTime - streamCurrentPacketTime;
-                streamDifferenceAbs = abs(streamDifference);
+                int64_t streamDifference = streamExpectFrameTime - streamCurrentPacketTime;
+                int64_t streamDifferenceAbs = abs(streamDifference);
                 // 3.3 根据时间差判断是不是最近的
                 isNearestPacket =
                         (streamDifferenceAbs <= streamHalfTimeIntervalBetween2Frame) || (streamDifference <= 0);
                 // streamDifference  < 0 时 可能错误帧或者卡帧的情况下 会导致滞后过多（水印时间偏大） 应该按照截图失败处理
                 // 暂定差值大于 2秒内的帧数量 * streamHalfTimeIntervalBetween2Frame * 2
                 // 校验帧率合法性 帧率合法范围 8- 60帧/秒
-                if (streamDifference < 0 && videoFrameRateDouble < Frame_Rate_Max_Limit
-                    && videoFrameRateDouble > Frame_Rate_Min_Limit) {
+                if (streamDifference < 0 && videoFrameRateDouble < Frame_Rate_Max_Limit &&
+                    videoFrameRateDouble > Frame_Rate_Min_Limit) {
                     int64_t deviation = Intercept_Max_Deviation_Second * videoFrameRateDouble *
                                         streamHalfTimeIntervalBetween2Frame * 2;
                     if (streamDifferenceAbs > deviation) {
                         interceptPointSuccess = false;
-                        Log::error(TAG, "point = %llu interceptFromVideo faild", timestamp);
-                        // 保存2份日志 如果只记录普通日志 不知道发生的几率
-//                        Log::error(LOGGER_INFO, TAG, "taskId = %lld, point = %lld faild", rid, points.at(frameIndex)->timestamp);
                         break;
                     }
                 }
-
             } else {
                 // 3.2 如果pts=0，也就是第一帧，会是纯黑的。pts<0属于异常。
                 isNearestPacket = false;
@@ -434,14 +416,15 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
                 av_free_packet(&packet);
                 continue;
             }
-            Log::error(TAG, "point = %llu interceptFromVideo succeed", timestamp);
+
+            Log::info(TAG, "point=%llu intercept succeed.", timestamp);
             interceptPointSuccess = true;
             break;
-        } // end while
+        }
 
         // 截图失败
         if (!interceptPointSuccess) {
-            Log::error(TAG, "point = %lld interceptFromVideo faild", timestamp);
+            Log::error(TAG, "point=%lld intercept faild.", timestamp);
             av_free_packet(&packet);
             continue;
         }
@@ -456,53 +439,18 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
 //            continue;
 //        }
 
-//        if (this->enableHardDecoding) {
         // YUV 缩放
-        resultCode = sws_scale(swsCtxYuv, frameOrigin->data, frameOrigin->linesize, 0,
-                               codecCtx->height, frameYuv->data, frameYuv->linesize);
-
+        resultCode = sws_scale(swsCtxYuv, frameOrigin->data, frameOrigin->linesize, 0, codecCtx->height, frameYuv->data,
+                               frameYuv->linesize);
         if (resultCode < 0) {
             av_free_packet(&packet);
             av_strerror(resultCode, errorBuffer, STACK_SIZE);
-            Log::error(TAG, "sws_scale() failed, code=%d, error=%s",
-                       resultCode, errorBuffer);
+            Log::error(TAG, "sws_scale() failed, code=%d, error=%s", resultCode, errorBuffer);
             continue;
         }
-//        }
 
 //        u8 endINTERCEPT = CommonUtils::GetSystemTime_mills();
-//        Log::error(LOGGER_INFO, TAG, "INTERCEPT 耗时= %llu 毫秒",
-//                   endINTERCEPT - startINTERCEPT);
-//
-//        // 保存该帧
-//        bool saveFrameSuccess = false;
-//
-//        std::string webpFilePath;
-//        if (enableHardDecoding) {
-////            webpFilePath = points.at(frameIndex)->getImagePathHardWebp30();
-//        } else {
-//            webpFilePath = points.at(frameIndex)->getImagePathSoftWebp30();
-//        }
-//
-//        u8 t1 = CommonUtils::GetSystemTime_mills();
-//
-//        if (!enableHardDecoding) {
-//            // 将帧存为 webp
-//            saveFrameSuccess = saveFrameWebp(frameRgb, m_nDestWidth, m_nDestHeight,
-//                                             webpFilePath.c_str());
-//        } else {
-//            saveFrameSuccess = true;
-//        }
-
-//        u8 t2 = CommonUtils::GetSystemTime_mills();
-//        Log::error(LOGGER_INFO, TAG, "timestamp=%llu, saveFrameWebp()耗时 %llu 毫秒",
-//                   timestamp, (t2 - t1));
-//
-//        if (enableHardDecoding) {
-//
-//            t1 = CommonUtils::GetSystemTime_mills();
-
-//        auto curPoint = videoModel->points.at(frameIndex);
+//        Log::error(LOGGER_INFO, TAG, "INTERCEPT 耗时= %llu 毫秒", endINTERCEPT - startINTERCEPT);
 
         // 将帧存为 jpeg
         bool saveFrameSuccess = saveFrameJpeg(frameYuv, videoDestWidth, videoDestHeight, timestamp);
@@ -512,11 +460,6 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
         }
 
         av_free_packet(&packet);
-
-//            t2 = CommonUtils::GetSystemTime_mills();
-//            Log::error(LOGGER_INFO, TAG, "timestamp=%llu, saveFrameJpeg()耗时 %llu 毫秒",
-//                       timestamp, (t2 - t1));
-//        }
 
         // 图片数+1
         VideoInterceptor::imageCount += 1;
@@ -543,7 +486,7 @@ bool VideoInterceptor::openVideoFile(const std::string &videoFilePath) {
 
     // 打开视频并读取视频的头信息
     char errorBuffer[STACK_SIZE] = {};
-    int ret = avformat_open_input(&formatCtx, videoFilePath.c_str(), nullptr, 0);
+    int ret = avformat_open_input(&formatCtx, videoFilePath.c_str(), nullptr, nullptr);
     if (ret < 0) {  // 小于0是失败
         av_strerror(ret, errorBuffer, STACK_SIZE);
         Log::error(TAG, "avformat_open_input failed, code=%d, error=%s", ret, errorBuffer);
@@ -634,9 +577,6 @@ bool VideoInterceptor::openVideoFile(const std::string &videoFilePath) {
 
     Log::info(TAG, "图片实际宽高: %dx%d , 图片缩放宽高: %dx%d", videoRealWidth, videoRealHeight, videoDestWidth, videoDestHeight);
 
-//    videoDestHeight -= videoDestHeight % 16;
-//    videoDestWidth -= videoDestWidth % 16;
-
     // 创建空的帧
     frameOrigin = av_frame_alloc();
     if (frameOrigin == nullptr) {
@@ -726,16 +666,13 @@ bool VideoInterceptor::openVideoFile(const std::string &videoFilePath) {
  * @param[out] isValid 返回的时间间隔是否有效
  * @param[out] interval 时间间隔, 单位微秒
  */
-void VideoInterceptor::getKeyPacketTimeInterval(bool *isValid, int64_t *avInterval) {
+void VideoInterceptor::getKeyPacketTimeInterval(bool &isValid, int64_t &avInterval) {
 
-//    u8 startTimeTemp = CommonUtils::GetSystemTime_mills(); // TODO:delete
     AVPacket packet;
     av_init_packet(&packet);
 
+    // 清空视频解码过滤器的缓存
     avcodec_flush_buffers(formatCtx->streams[videoIndex]->codec);
-
-    // 视频流的时基
-    AVRational streamTimebase = formatCtx->streams[videoIndex]->time_base;
 
     // 第一个关键帧的pts
     int64_t firstIPacketPTS = -1;
@@ -750,20 +687,15 @@ void VideoInterceptor::getKeyPacketTimeInterval(bool *isValid, int64_t *avInterv
     // 期望读取的帧的数量，超过这个值不再读取
     const int Packet_Count = 3000;
 
-    int resultCode = 0;
-    bool isVideoPacket = false;
-
-    while (resultCode == 0 && nextPacketIndex < Packet_Count && sumCount < I_Packet_Count) {
-        resultCode = av_read_frame(formatCtx, &packet);
+    while (nextPacketIndex < Packet_Count && sumCount < I_Packet_Count) {
+        int resultCode = av_read_frame(formatCtx, &packet);
         if (resultCode != 0) {
             break;
         }
 
-        // 是视频帧
-        isVideoPacket = (packet.stream_index == videoIndex);
-        if (isVideoPacket) {
-//            Log::error(LOGGER_WARNING, TAG, "dts:%lld, pts:%lld", packet.dts, packet.pts);
-            // 是关键帧
+        // 判断是否是视频帧
+        if (packet.stream_index == videoIndex) {
+            // 判断是否是是关键帧
             int isKeyPacket = (packet.flags & AV_PKT_FLAG_KEY);
             if (isKeyPacket) {
                 // 第一个关键帧赋值
@@ -782,25 +714,17 @@ void VideoInterceptor::getKeyPacketTimeInterval(bool *isValid, int64_t *avInterv
 
     // 计算出平均两个关键帧之间时间间隔
     bool isGopSizeValid = false;
-    int64_t streamAverageTimeInterval = -1;
     int64_t avKeyPacketTimeInterval = -1;
     if (sumCount > 1) {
-        streamAverageTimeInterval = (lastIPacketPTS - firstIPacketPTS) / (sumCount - 1);
-        avKeyPacketTimeInterval = av_rescale_q(streamAverageTimeInterval, streamTimebase,
-                                               AV_TIME_BASE_Q);
+        // 视频流的时基
+        AVRational streamTimebase = formatCtx->streams[videoIndex]->time_base;
+        int64_t streamAverageTimeInterval = (lastIPacketPTS - firstIPacketPTS) / (sumCount - 1);
+        avKeyPacketTimeInterval = av_rescale_q(streamAverageTimeInterval, streamTimebase, AV_TIME_BASE_Q);
         isGopSizeValid = true;
-    } else {
-        isGopSizeValid = false;
     }
 
-//    u8 endTimeTemp = CommonUtils::GetSystemTime_mills();
-//    u8 coast = endTimeTemp - startTimeTemp;
-
-    // 赋返回值
-    *isValid = isGopSizeValid;
-    *avInterval = avKeyPacketTimeInterval;
-
-//    Log::error(LOGGER_WARNING, TAG, "scan cost time %lld, avAverageInterval = %lld", coast, avKeyPacketTimeInterval);
+    isValid = isGopSizeValid;
+    avInterval = avKeyPacketTimeInterval;
 }
 
 bool VideoInterceptor::saveFrameJpeg(AVFrame *frame, int width, int height, Timestamp timestamp) {
@@ -829,17 +753,8 @@ bool VideoInterceptor::saveFrameJpeg(AVFrame *frame, int width, int height, Time
 
 //    u8 t1 = CommonUtils::GetSystemTime_mills();
 
-    int ret = yuv2jpeg(
-            yuv_buffer,
-            yuv_size,
-            width,
-            height,
-            padding,
-            quality,
-            &jpg_buffer,
-            jpg_size);
-
-    if (ret != 0 || jpg_buffer == nullptr) {
+    JpegUtil::yuv2Jpeg(yuv_buffer, yuv_size, width, height, padding, quality, &jpg_buffer, jpg_size);
+    if (jpg_buffer == nullptr) {
         Log::error(TAG, "Failed to encode YUV to JPEG.");
         return false;
     }
@@ -889,31 +804,6 @@ bool VideoInterceptor::saveFrameJpeg(AVFrame *frame, int width, int height, Time
     return true;
 }
 
-int VideoInterceptor::yuv2jpeg(Byte *yuv_buffer, int yuv_size, int width, int height, int padding, int quality, Byte **jpg_buffer, int &jpg_size) {
-
-    TJSAMP subsample = TJSAMP_420;
-    int need_size = tjBufSizeYUV2(width, padding, height, subsample);
-    if (need_size != yuv_size) {
-        Log::error("yu12jpeg",
-                   "数据长度错误，根据宽高和padding计算的yuv数据长度=%d，给出的yuv数据长度=%d", need_size,
-                   yuv_size);
-        return -1;
-    }
-
-    int flags = 0;
-    unsigned long retSize = 0;
-    tjhandle handle = tjInitCompress();
-    int ret = tjCompressFromYUV(handle, yuv_buffer, width, padding, height, subsample,
-                            jpg_buffer, &retSize, quality, flags);
-    jpg_size = retSize;
-    if (ret < 0) {
-        Log::error("yu12jpeg", "压缩jpeg失败，错误信息:%s", tjGetErrorStr());
-    }
-    tjDestroy(handle);
-
-    return ret;
-}
-
 long long int VideoInterceptor::getImageCount() {
     return VideoInterceptor::imageCount;
 }
@@ -922,220 +812,98 @@ void VideoInterceptor::setImageDir(const std::string &imageDir) {
     this->imageDir = imageDir;
 }
 
-//bool VideoInterceptor::jpeg2Webp(unsigned char *jpegBuf, unsigned long jpegSize,
-//                                 const char *const webpFilePath) const {
-//
-//    if (jpegBuf == nullptr || jpegSize == 0 || webpFilePath == nullptr) {
-//        LOG(TAG, "jpegBuf == nullptr || jpegSize == 0 || webpFilePath == nullptr");
-//        return false;
-//    }
-//
+bool VideoInterceptor::saveFrameWebp(AVFrame *pFrame, int width, int height, const char *photoFilePath) {
+
+    if (pFrame == nullptr) {
+        Log::error(TAG, "pFrame == nullptr");
+        return false;
+    }
+
+    uint8_t *output = nullptr;
+    int size_webp = 0;
+    int qualityForCompressWebp = Webp_Compression_Quality;  // 压缩质量
+    int lossless = 0;  // 0有损  1无损
+
+    // 自定义：去掉滤波
+    WebpUtil::rgb2Webp(pFrame->data[0], width, height, width * 3, qualityForCompressWebp, lossless, &output, size_webp);
+
+    // 校验
+    if (size_webp <= 0 || output == nullptr) {
+        Log::error(TAG, "size_webp <= 0 || output == nullptr !!!");
+        return false;
+    }
+
+    // 保存文件
+    FILE *fp_out = nullptr;
+    if ((fp_out = fopen(photoFilePath, "wb+")) == nullptr) {
+        Log::error(TAG, "can't open webp file:%s", photoFilePath);
+        free(output);
+        return false;
+    }
+
+    fwrite(output, 1, size_webp, fp_out);
+    fclose(fp_out);
+
+    free(output);
+    return true;
+}
+
+bool VideoInterceptor::jpeg2Webp(unsigned char *jpegBuf, int jpegSize, const char *const webpFilePath) const {
+
+    if (jpegBuf == nullptr || jpegSize == 0 || webpFilePath == nullptr) {
+        Log::error(TAG, "jpegBuf == nullptr || jpegSize == 0 || webpFilePath == nullptr");
+        return false;
+    }
+
 //    u8 t1 = CommonUtils::GetSystemTime_mills();
-//
-//    /**
-//     * 将 jpeg 解码为 rgb
-//     */
-//
-//    // 创建一个 turbojpeg 句柄
-//    tjhandle handle = tjInitDecompress();
-//    if (nullptr == handle) {
-//        Log::error(LOGGER_WARNING, TAG, "tjInitDecompress() failed.");
-////        free(jpegBuf);
-//        return false;
-//    }
-//
-//    int imgWidth = 0;
-//    int imgHeight = 0;
-//    int imgSubsamp = 0;
-//    int imgColorspace = 0;
-//
-//    // 解析 jpeg 图片的宽高
-//    int ret = tjDecompressHeader3(handle, jpegBuf, jpegSize, &imgWidth, &imgHeight,
-//                                  &imgSubsamp, &imgColorspace);
-//    if (ret != 0) {
-////        free(jpegBuf);
-//        tjDestroy(handle);
-//        Log::error(LOGGER_WARNING, TAG, "tjDecompressHeader3() failed.");
-//        return false;
-//    }
-//    tjDestroy(handle);
-//
-//    int outSize = 0;
-//
-//    // 将 jpeg 解码为 rgb
-//    BYTE *rgb = tjpeg_decompress_2_rgb(jpegBuf, jpegSize, imgWidth, imgHeight, outSize);
-//    if (rgb == nullptr || outSize <= 0) {
-//        Log::error(LOGGER_INFO, TAG, "jpeg转rgb失败");
-////        free(jpegBuf);
-//        return false;
-//    }
-//
-//    /**
-//     * 将 rgb 再编码为 webp
-//     */
-//
-//    uint8_t *webpBuf = nullptr;
-//    int lossless = 0; // 0有损  1无损
-//    const int qualityForCompressWebp = Webp_Compression_Quality;  // 压缩质量
-//
-//    // 自定义 去掉滤波
-//    size_t size_webp = WebpEncoder::WebpCustomizedEncode(rgb, imgWidth, imgHeight,
-//                                                         imgWidth * 3,
-//                                                         (float) qualityForCompressWebp, lossless,
-//                                                         &webpBuf);
-//    // 对size_webp 进行校验
-//    if (size_webp <= 0 || webpBuf == nullptr) {
-//        Log::error(LOGGER_WARNING, TAG, "size_webp <= 0 || output == nullptr !!!");
-//        free(rgb);
-//        rgb = nullptr;
-//        return false;
-//    }
-//
-//    LOG(TAG, "保存硬解jpeg80转webp30图片:%s", webpFilePath);
-//
-//    // 保存文件
-//    FILE *fp_out = nullptr;
-//    if ((fp_out = fopen(webpFilePath, "wb+")) == nullptr) {
-//        Log::error(LOGGER_WARNING, TAG, "can't open webp file:%s", webpFilePath);
-//        // 需要释放output
-//        WebpEncoder::freeMemory(webpBuf);
-//        free(rgb);
-//        return false;
-//    }
-//
-//    // 写入文件
-//    fwrite(webpBuf, 1, size_webp, fp_out);
-//    fclose(fp_out);
-//
-//    // 需要释放 output
-//    WebpEncoder::freeMemory(webpBuf);
-//    webpBuf = nullptr;
-//
-//    free(rgb);
-//    rgb = nullptr;
-//
-//    u8 t2 = CommonUtils::GetSystemTime_mills();
-//    Log::error(LOGGER_INFO, TAG, "jpeg2Webp() 耗时 %llu 毫秒", (t2 - t1));
-//
-//    return true;
-//}
 
-//Byte *VideoInterceptor::tjpeg_decompress_2_rgb(Byte *jpg_buffer, int jpeg_size, int in_width,
-//                                               int in_height, int &out_size) const {
-//    tjhandle handle = nullptr;
-//    int img_subsamp;
-//    int img_colorspace;
-//    int flags = 0;
-//    int pixelfmt = TJPF_RGB;
-//
-//    /* 创建一个turbojpeg句柄 */
-//    handle = tjInitDecompress();
-//    if (nullptr == handle) {
-//        return nullptr;
-//    }
-//
-//    int jpg_width = 0;
-//    int jpg_height = 0;
-//
-//    /* 获取jpg图片相关信息但并不解压缩 */
-//    int ret = tjDecompressHeader3(handle, jpg_buffer, jpeg_size, &jpg_width,
-//                                  &jpg_height, &img_subsamp, &img_colorspace);
-//    if (0 != ret) {
-//        tjDestroy(handle);
-//        return nullptr;
-//    }
-//
-//    if (jpg_height != in_height || jpg_width != in_width) {
-//        tjDestroy(handle);
-//        return nullptr;
-//    }
-//
-//    out_size = jpg_height * jpg_width * 3;
-//    Byte *rgb_buffer = (Byte *) malloc(sizeof(Byte) * out_size);
-//    ret = tjDecompress2(handle, jpg_buffer, jpeg_size, rgb_buffer,
-//                        jpg_width, 0, jpg_height, pixelfmt, flags);
-//    if (0 != ret) {
-//        free(rgb_buffer);
-//        tjDestroy(handle);
-//        return nullptr;
-//    }
-//    tjDestroy(handle);
-//    return rgb_buffer;
-//}
+    /**
+     * 将 jpeg 解码为 rgb
+     */
 
+    int jpegWidth = 0;
+    int jpegHeight = 0;
+    unsigned char *rgbBuf = nullptr;
+    int rgbSize = 0;
+    JpegUtil::jpeg2Rgb(jpegBuf, jpegSize, jpegWidth, jpegHeight, &rgbBuf, rgbSize);
+    if (rgbBuf == nullptr || rgbSize <= 0) {
+        Log::error(TAG, "jpeg2Rgb failed.");
+        return false;
+    }
 
-/**
- * 压缩并保存一帧到文件(webp)
- * @param pFrame 要保存的帧
- * @param width 目的宽
- * @param height 目的高
- * @param photoFilePath 目的路径
- * @param crc crc32码
- * @param isComplete 是否保存完成
- * @return true 保存完成 false 保存失败
- */
+    /**
+     * 将 rgb 再编码为 webp
+     */
 
-//bool VideoInterceptor::saveFrameWebp(AVFrame *pFrame, int width, int height, const char *photoFilePath) {
-//
-//    if (pFrame == nullptr) {
-//        LOG(TAG, "pFrame == nullptr");
-//        return false;
-//    }
-//
-//    uint8_t *output = nullptr;
-//    int qualityForCompressWebp = Webp_Compression_Quality;  // 压缩质量
-//
-////	u8 t1 = CommonUtils::GetSystemTime_mills();
-//
-//    // 0有损  1无损
-//    int lossless = 0;
-//    // size_t size_webp = WebPEncodeRGB(pFrame->data[0], width, height, width*3, qualityForCompressWebp, &output);
-//    // 自定义 去掉滤波
-//    size_t size_webp = WebpEncoder::WebpCustomizedEncode(pFrame->data[0], width, height, width * 3,
-//                                                         qualityForCompressWebp, lossless, &output);
-//    // 对size_webp 进行校验
-//    if (size_webp <= 0 || output == nullptr) {
-////        isComplete = false;
-//        Log::error(LOGGER_WARNING, "PhotoIntercept",
-//                   "size_webp <= 0 || output == nullptr !!!");
-//        return false;
-//    }
-//
-////    u8 t2 = CommonUtils::GetSystemTime_mills();
-////	Log::error(LOGGER_INFO, TAG, "rgb转webp耗时 %llu 毫秒", (t2 - t1));
-//
-////    crc = 0;
-////    crc = CommonUtils::get_crc32(crc, output, size_webp);
-////    if(!CImageQuality::checkWebP((const uchar*)output,  size_webp))
-////    {
-////        isComplete = false;
-////        Log::error(LOGGER_WARNING, TAG, "checkWebp return false;");
-////        WebpEncoder::freeMemory(output);
-////        return false;
-////    }
-//
-//    if (enableHardDecoding) {
-//        LOG(TAG, "保存硬解webp30图片:%s", photoFilePath);
-//    } else {
-//        LOG(TAG, "保存软解webp30图片:%s", photoFilePath);
-//    }
-//
-//    // 保存文件
-//    FILE *fp_out = nullptr;
-//    if ((fp_out = fopen(photoFilePath, "wb+")) == nullptr) {
-////        isComplete = false;
-//        Log::error(LOGGER_WARNING, "PhotoIntercept", "can't open webp file:%s",
-//                   photoFilePath);
-//        // 需要释放output
-//        WebpEncoder::freeMemory(output);
-//        return false;
-//    }
-//    fwrite(output, 1, size_webp, fp_out);
-//    fclose(fp_out);
-//    // 需要释放output
-//    WebpEncoder::freeMemory(output);
-//    // end webp -----------------------------------------
-//
-////    isComplete = true;
-//    return true;
-//}
+    int webpSize = 0;
+    unsigned char *webpBuf = nullptr;
+    const int qualityForCompressWebp = Webp_Compression_Quality;  // 压缩质量
+    const int lossless = 0;  // 0:有损, 1:无损
+    WebpUtil::rgb2Webp(rgbBuf, jpegWidth, jpegHeight, jpegWidth * 3, qualityForCompressWebp, lossless, &webpBuf,
+                       webpSize);
+
+    // 对size_webp 进行校验
+    if (webpSize <= 0 || webpBuf == nullptr) {
+        Log::error(TAG, "webpSize <= 0 || webpBuf == nullptr !");
+        free(rgbBuf);
+        return false;
+    }
+
+    free(rgbBuf);
+    rgbBuf = nullptr;
+
+    // 保存文件
+    FILE *fp_out = nullptr;
+    if ((fp_out = fopen(webpFilePath, "wb+")) == nullptr) {
+        Log::error(TAG, "can't open webp file:%s", webpFilePath);
+        free(webpBuf);
+        return false;
+    }
+
+    // 写入文件
+    fwrite(webpBuf, 1, webpSize, fp_out);
+    fclose(fp_out);
+
+    free(webpBuf);
+    return true;
+}

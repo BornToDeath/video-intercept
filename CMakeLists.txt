@@ -18,22 +18,26 @@ target_include_directories(
         inc
         inc/ffmpeg-4.4.2/mac
         inc/libjpeg-turbo-2.0.5/include
+        inc/webp
 )
 
 # 依赖的库文件目录
 target_link_directories(
         ${LIB_NAME} PUBLIC
         libs/ffmpeg-4.4.2/mac_shared
-        libs/libjpeg-turbo-2.0.5
+        libs/libjpeg-turbo-2.0.5/mac_static
+        libs/webp/mac_static
 )
 
 # 依赖的库文件
 set(FFMPEG_LIBS avdevice avfilter avformat avutil swresample swscale avcodec)
 set(JPEG_LIBS turbojpeg)
+set(WEBP_LIBS webp webpdecoder webpdemux webpmux)
 target_link_libraries(
         ${LIB_NAME} PUBLIC
         ${FFMPEG_LIBS}
         ${JPEG_LIBS}
+        ${WEBP_LIBS}
 )
 
 # 编译成可执行文件

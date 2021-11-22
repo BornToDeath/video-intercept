@@ -10,10 +10,10 @@
 #define TAG "Interception"
 
 
-bool Interception::interceptFromVideo(const char *const videoPath, const char* const imageDir) {
+void Interception::interceptFromVideo(const char *const videoPath, const char* const imageDir) {
     if (videoPath == nullptr || !FileUtil::isFileExist(videoPath)) {
         Log::error(TAG, "videoPath == nulltr || video file not exist.");
-        return false;
+        return;
     }
 
     // 解析视频信息
@@ -21,6 +21,10 @@ bool Interception::interceptFromVideo(const char *const videoPath, const char* c
 
     // 获取待截图点
     getInterceptPoints(videoModel->start, videoModel->end, videoModel->points);
+    if (videoModel->points.empty()) {
+        Log::warn(TAG, "视频没有截图点! video:%s", videoPath);
+        return;
+    }
 
     // 截图
     VideoInterceptor interceptor;

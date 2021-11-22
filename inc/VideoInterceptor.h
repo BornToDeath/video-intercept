@@ -70,10 +70,10 @@ private:
      */
     bool openVideoFile(const std::string &videoFilePath);
 
-    void getKeyPacketTimeInterval(bool *isValid, int64_t *avInterval);
+    void getKeyPacketTimeInterval(bool &isValid, int64_t &avInterval);
 
     /**
-     * 将截取到的帧数据保存为 JPEG
+     * 将 YUV 帧数据保存为 JPEG
      * @param frame
      * @param width
      * @param height
@@ -83,26 +83,23 @@ private:
     bool saveFrameJpeg(AVFrame *frame, int width, int height, Timestamp timestamp);
 
     /**
-     * YUV 转 JPEG
-     * @param yuv_buffer
-     * @param yuv_size
+     * 将 RGB 帧数据保存为 WEBP
+     * @param pFrame
      * @param width
      * @param height
-     * @param padding
-     * @param quality
-     * @param jpg_buffer
-     * @param jpg_size
+     * @param photoFilePath
      * @return
      */
-    static int yuv2jpeg(Byte *yuv_buffer, int yuv_size,
-                        int width, int height, int padding, int quality,
-                        Byte **jpg_buffer, int &jpg_size);
+    static bool saveFrameWebp(AVFrame *pFrame, int width, int height, const char *photoFilePath);
 
-//    bool saveFrameWebp(AVFrame *pFrame, int width, int height, const char *photoFilePath);
-
-//    bool jpeg2Webp(unsigned char *jpegBuf, unsigned long jpegSize, const char *const webpFilePath) const;
-
-//    unsigned char * tjpeg_decompress_2_rgb(unsigned char *jpg_buffer, int jpeg_size, int in_width, int in_height, int &out_size) const;
+    /**
+     * JPEG 转 WEBP 并保存
+     * @param jpegBuf
+     * @param jpegSize
+     * @param webpFilePath
+     * @return
+     */
+    static bool jpeg2Webp(unsigned char *jpegBuf, int jpegSize, const char *const webpFilePath) const;
 
 
 private:

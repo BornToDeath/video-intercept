@@ -25,7 +25,7 @@ public:
      * @param imageDir
      * @return
      */
-    bool interceptFromVideo(const char *const videoPath, const char* const imageDir);
+    void interceptFromVideo(const char *const videoPath, const char* const imageDir);
 
 private:
 

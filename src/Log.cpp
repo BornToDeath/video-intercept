@@ -6,6 +6,7 @@
 #include <cstdarg>
 #include <ctime>
 #include <chrono>
+#include <sstream>
 #include "Log.h"
 
 #define LOG_SIZE (1024)
@@ -27,7 +28,14 @@ enum class LogLevel : int {
 inline void printLog(LogLevel level, const char *const tag, const char *const log) {
     const char logName = LogName[static_cast<std::underlying_type<LogLevel>::type>(level)];
     auto dateTime = Log::getCurrentDateTime();
-    std::string logText(log);
+
+    std::ostringstream oss;
+    oss << dateTime
+        << " | " << logName
+        << " | " << tag
+        << " | " << log;
+
+    std::string logText(oss.str());
     switch (level) {
         case LogLevel::Error: {
             logText = LOG_COLOR_RED + logText + LOG_COLOR_RESET;
@@ -40,7 +48,7 @@ inline void printLog(LogLevel level, const char *const tag, const char *const lo
         default:
             break;
     }
-    printf("%s | %c | %s | %s\n", dateTime.c_str(), logName, tag, logText.c_str());
+    printf("%s\n", logText.c_str());
 }
 
 void Log::debug(const char *const tag, const char *const msg, ...) {
@@ -84,7 +92,7 @@ std::string Log::getCurrentDateTime() {
     char now[SIZE] = {};
     auto curTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     strftime(now, sizeof(now), "%Y-%m-%d %H:%M:%S", std::localtime(&curTime));
-    return std::string(now);
+    return {now};
 }
 
 Timestamp Log::getCurrentTimeMills() {
