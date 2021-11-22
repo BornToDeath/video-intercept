@@ -234,9 +234,7 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
 
     // 两帧之间的时间间隔的一半，单位微秒
     int avHalfTimeIntervalBetween2Frame = ((int) (AV_TIME_BASE / videoFrameRateDouble)) >> 1;
-    int64_t streamHalfTimeIntervalBetween2Frame = av_rescale_q(avHalfTimeIntervalBetween2Frame, AV_TIME_BASE_Q,
-                                                               steamTimeBase);
-//    Log::error(LOGGER_WARNING, TAG, "视频帧率 = %f, 帧间距的一半 = %lld", videoFrameRateDouble, streamHalfTimeIntervalBetween2Frame);
+    int64_t streamHalfTimeIntervalBetween2Frame = av_rescale_q(avHalfTimeIntervalBetween2Frame, AV_TIME_BASE_Q, steamTimeBase);
 
     // 获取两个关键帧之间的平均间隔（参考值）
     bool isGopSizeValid = false;
@@ -261,8 +259,6 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
             Log::warn(TAG, "当前时间戳不在视频范围内！timestamp: %llu, video: %s", timestamp, videoModel->videoPath.c_str());
             continue;
         }
-
-//        u8 startINTERCEPT = CommonUtils::GetSystemTime_mills();
 
         // 截图点的相对时间，以内部时基为时基，单位：微秒
         int64_t avExpectFrameTime = static_cast<int64_t>(timestamp - videoModel->start) * 1000;
@@ -448,9 +444,6 @@ bool VideoInterceptor::intercept(const std::shared_ptr<VideoModel> &videoModel) 
             Log::error(TAG, "sws_scale() failed, code=%d, error=%s", resultCode, errorBuffer);
             continue;
         }
-
-//        u8 endINTERCEPT = CommonUtils::GetSystemTime_mills();
-//        Log::error(LOGGER_INFO, TAG, "INTERCEPT 耗时= %llu 毫秒", endINTERCEPT - startINTERCEPT);
 
         // 将帧存为 jpeg
         bool saveFrameSuccess = saveFrameJpeg(frameYuv, videoDestWidth, videoDestHeight, timestamp);
@@ -778,24 +771,6 @@ bool VideoInterceptor::saveFrameJpeg(AVFrame *frame, int width, int height, Time
     }
     fwrite(jpg_buffer, 1, jpg_size, fp_out);
     fclose(fp_out);
-
-//    // 图片数+1
-//    VideoInterceptor::imageCount += 1;
-
-//    {
-//        /**
-//         * 将 jpeg80 转为 webp30
-//         */
-//
-//        const char *const webpFilePath = point->getImagePathHardJpeg80ToWebp30().c_str();
-//        bool isOk = jpeg2Webp(jpg_buffer, jpg_size, webpFilePath);
-//        if (!isOk) {
-//            LOG(TAG, "保存硬解jpeg80转webp30失败:%s", webpFilePath);
-//        } else {
-//            // 图片数+1
-//            VideoInterceptor::imageCount += 1;
-//        }
-//    }
 
     if (jpg_buffer) {
         free(jpg_buffer);
